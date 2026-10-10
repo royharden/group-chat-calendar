@@ -1,0 +1,10 @@
+project_id = "group-chat-calendar"
+
+[functions.jev]
+verify_jwt = false
+
+[functions.extract-events]
+verify_jwt = false
+
+[functions.ics-feed]
+verify_jwt = false
