@@ -1,34 +1,59 @@
-// @ts-nocheck
+import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+
+// Public, read-only calendar feed (verify_jwt = false so calendar apps can
+// subscribe). It calls no AI and never writes. The unguessable `slug` in the
+// URL picks exactly one chat, and only that chat's approved/cancelled events
+// are served. Slugs are not readable through the anon API.
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
+const SLUG_RE = /^[A-Za-z0-9]{12,128}$/;
+const TZ_RE = /^[A-Za-z0-9_+\-/]{1,64}$/;
+const MAX_EVENTS = 1_000;
+
+interface FeedAttendee {
+  name?: string;
+  status?: string;
+}
+
+interface FeedEvent {
+  title: string;
+  kind: string;
+  start_date: string | null;
+  start_time: string | null;
+  all_day: boolean;
+  location: string | null;
+  attendees: FeedAttendee[] | null;
+  source_message_ids: string[] | null;
+  status: string;
+  uid: string | null;
+  user_note: string | null;
+}
+
+function jsonError(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 200, headers: corsHeaders });
+  if (req.method !== "GET" && req.method !== "HEAD") return jsonError("Method not allowed", 405);
 
   try {
-    if (req.method !== "GET") {
-      return new Response(JSON.stringify({ error: "Method not allowed" }), {
-        status: 405,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
-
     const slug = new URL(req.url).searchParams.get("slug");
-    if (!slug) {
-      return new Response(JSON.stringify({ error: "slug is required" }), {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    if (!slug) return jsonError("slug is required", 400);
+    if (!SLUG_RE.test(slug)) return jsonError("Feed not found", 404);
 
-    const { createClient } = await import("npm:@supabase/supabase-js@2.57.4");
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-    );
+    const url = Deno.env.get("SUPABASE_URL");
+    const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!url || !key) return jsonError("Feed unavailable", 503);
+    const supabase = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
 
     const { data: chat, error: chatErr } = await supabase
       .from("chats")
@@ -36,24 +61,22 @@ Deno.serve(async (req: Request) => {
       .eq("feed_slug", slug)
       .maybeSingle();
     if (chatErr) throw chatErr;
-    if (!chat) {
-      return new Response(JSON.stringify({ error: "Feed not found" }), {
-        status: 404,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
-    }
+    if (!chat) return jsonError("Feed not found", 404);
 
-    const { data: events, error: eventsErr } = await supabase
+    const { data, error: eventsErr } = await supabase
       .from("events")
-      .select(
-        "title, kind, start_date, start_time, all_day, location, attendees, source_message_ids, status, uid, confidence, note, user_note"
-      )
+      .select("title, kind, start_date, start_time, all_day, location, attendees, source_message_ids, status, uid, user_note")
       .eq("chat_id", chat.id)
-      .in("status", ["approved", "cancelled"]);
+      .in("status", ["approved", "cancelled"])
+      .order("created_at", { ascending: true })
+      .limit(MAX_EVENTS);
     if (eventsErr) throw eventsErr;
+    const events = (data ?? []) as FeedEvent[];
 
     const esc = (s: string) =>
-      s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+      s.replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r\n|\r|\n/g, "\\n");
+    // Property values that are not TEXT (UID) must never carry line breaks.
+    const oneLine = (s: string) => s.replace(/[\r\n]+/g, " ");
 
     const fmtDate = (d: string) => d.replace(/-/g, "");
     const fmtTime = (t: string | null) => (t ?? "00:00:00").slice(0, 8).replace(/:/g, "");
@@ -61,7 +84,7 @@ Deno.serve(async (req: Request) => {
     // Mirror the download path: timed events carry the chat's timezone via
     // TZID (with a VTIMEZONE block) so 4 PM stays 4 PM in any calendar app.
     const tz: string | undefined =
-      typeof chat.timezone === "string" && chat.timezone.trim() && chat.timezone !== "UTC"
+      typeof chat.timezone === "string" && TZ_RE.test(chat.timezone.trim()) && chat.timezone !== "UTC"
         ? chat.timezone.trim()
         : undefined;
 
@@ -71,45 +94,47 @@ Deno.serve(async (req: Request) => {
       "PRODID:-//Group Chat to Calendar//EN",
       "CALSCALE:GREGORIAN",
       "METHOD:PUBLISH",
-      `X-WR-CALNAME:${esc(chat.title)}`,
+      `X-WR-CALNAME:${esc(String(chat.title ?? "Calendar"))}`,
     ];
 
     if (tz) lines.push(...vtimezoneBlock(tz, new Date().getUTCFullYear()));
 
     const now = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
-    for (const ev of events ?? []) {
-      const uid =
-        ev.uid ??
-        `gc-${slug}-${(ev.source_message_ids ?? []).join("-")}@groupchat.calendar`;
+    for (const ev of events) {
+      if (!ev.start_date) continue;
+      const uid = oneLine(ev.uid ?? `gc-${slug}-${(ev.source_message_ids ?? []).join("-")}@groupchat.calendar`);
       const isCancelled = ev.status === "cancelled";
-      const isDeadline = ev.kind === "deadline" || ev.all_day;
+      const isDeadline = ev.kind === "deadline";
 
       lines.push("BEGIN:VEVENT");
       lines.push(`UID:${uid}`);
       lines.push(`DTSTAMP:${now}`);
       if (isCancelled) lines.push("STATUS:CANCELLED");
 
-      if (isDeadline || !ev.start_time) {
+      // Only events without a time are all-day. A timed deadline keeps its
+      // time and has no DTEND (it is a moment, not a block).
+      if (ev.all_day || !ev.start_time) {
         lines.push(`DTSTART;VALUE=DATE:${fmtDate(ev.start_date)}`);
       } else if (tz) {
         lines.push(`DTSTART;TZID=${tz}:${fmtDate(ev.start_date)}T${fmtTime(ev.start_time)}`);
-        lines.push(`DTEND;TZID=${tz}:${fmtDate(ev.start_date)}T${fmtTime(shiftHour(ev.start_time))}`);
+        if (!isDeadline) lines.push(`DTEND;TZID=${tz}:${fmtDate(ev.start_date)}T${fmtTime(shiftHour(ev.start_time))}`);
       } else {
         lines.push(`DTSTART:${fmtDate(ev.start_date)}T${fmtTime(ev.start_time)}Z`);
-        lines.push(`DTEND:${fmtDate(ev.start_date)}T${fmtTime(shiftHour(ev.start_time))}Z`);
+        if (!isDeadline) lines.push(`DTEND:${fmtDate(ev.start_date)}T${fmtTime(shiftHour(ev.start_time))}Z`);
       }
 
-      lines.push(`SUMMARY:${esc(isDeadline && ev.kind === "deadline" ? `Due: ${ev.title}` : ev.title)}`);
+      lines.push(`SUMMARY:${esc(isDeadline ? `Due: ${ev.title}` : ev.title)}`);
       const descParts: string[] = [];
       if (ev.location) descParts.push(`Where: ${ev.location}`);
-      const going = (ev.attendees ?? []).filter((a: any) => a.status === "going").map((a: any) => a.name);
-      const maybe = (ev.attendees ?? []).filter((a: any) => a.status === "maybe").map((a: any) => a.name);
+      const attendees = Array.isArray(ev.attendees) ? ev.attendees : [];
+      const going = attendees.filter((a) => a.status === "going").map((a) => String(a.name ?? ""));
+      const maybe = attendees.filter((a) => a.status === "maybe").map((a) => String(a.name ?? ""));
       if (going.length) descParts.push(`Going: ${going.join(", ")}`);
       if (maybe.length) descParts.push(`Maybe: ${maybe.join(", ")}`);
       if (ev.user_note) descParts.push(ev.user_note);
       if (descParts.length) lines.push(`DESCRIPTION:${esc(descParts.join("\n"))}`);
 
-      if (ev.kind === "deadline") {
+      if (isDeadline) {
         lines.push("BEGIN:VALARM");
         lines.push("ACTION:DISPLAY");
         lines.push("TRIGGER:-P1D");
@@ -122,19 +147,17 @@ Deno.serve(async (req: Request) => {
     lines.push("END:VCALENDAR");
 
     const ics = lines.map((l) => foldLine(l)).join("\r\n") + "\r\n";
-    return new Response(ics, {
+    return new Response(req.method === "HEAD" ? null : ics, {
       headers: {
         ...corsHeaders,
         "Content-Type": "text/calendar; charset=utf-8",
         "Content-Disposition": `inline; filename="${slug}.ics"`,
+        "Cache-Control": "private, max-age=300",
       },
     });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    console.error("[ics-feed] failed:", err);
+    return jsonError("Feed unavailable", 500);
   }
 });
 

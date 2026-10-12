@@ -11,4 +11,8 @@ if (!url || !anonKey) {
   throw new Error("Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY");
 }
 
-export const supabase = createClient(url, anonKey);
+// The anon key is sent explicitly as the Bearer token so every edge function
+// call (verify_jwt = true) carries it, in the browser and in Node scripts.
+export const supabase = createClient(url, anonKey, {
+  global: { headers: { Authorization: `Bearer ${anonKey}` } },
+});

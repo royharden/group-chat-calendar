@@ -5,7 +5,8 @@ import {
 } from "lucide-react";
 import { SAMPLE_CHATS } from "./lib/sampleChats";
 import { runPipeline, type PipelineResult, type RunOptions } from "./lib/pipeline";
-import { generateICS, stableUid } from "./lib/icsGenerator";
+import { generateICS } from "./lib/icsGenerator";
+import { updateEvent as storeEventUpdate, type EventPatch } from "./lib/chatStore";
 import { ConfidenceChip, KindChip, AttendeeList, ProbabilityBars } from "./components/common";
 import type { PipelineStats } from "./lib/types";
 import type { ChatEvent } from "./lib/types";
@@ -14,7 +15,7 @@ const STAGES = [
   { id: "parse", label: "Parse", icon: FileText },
   { id: "filter", label: "Jev filter", icon: Filter },
   { id: "extract", label: "LLM extract", icon: Sparkles },
-  { id: "date-parts", label: "Jev date parts", icon: CalendarClock },
+  { id: "date-parts", label: "Resolve dates", icon: CalendarClock },
   { id: "attendees", label: "Attendees", icon: MessageSquare },
   { id: "done", label: "Review", icon: CheckCircle2 },
 ];
@@ -38,7 +39,6 @@ export default function App() {
   const [result, setResult] = useState<PipelineResult | null>(null);
   const [events, setEvents] = useState<ChatEvent[]>([]);
   const [highlightIds, setHighlightIds] = useState<Set<string>>(new Set());
-  const [timeFilter, setTimeFilter] = useState("all");
 
   const offlineNotice = result?.offlineReason ?? null;
 
@@ -50,15 +50,20 @@ export default function App() {
     setEvents((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
   };
 
+  // Writes go through the chat-store edge function with this chat's write
+  // token (the anon key can no longer write tables directly).
+  const persistPatch = async (ev: ChatEvent, patch: EventPatch) => {
+    if (!result?.writeToken || !ev.uid) throw new Error("this chat is read-only here");
+    await storeEventUpdate({ chatId: ev.chatId, writeToken: result.writeToken }, ev.uid, patch);
+  };
+
   const setEventStatus = async (ev: ChatEvent, status: ChatEvent["status"]) => {
     updateEvent(ev.id, { status });
-    const { supabase } = await import("./lib/supabase");
-    const { error } = await supabase
-      .from("events")
-      .update({ status })
-      .eq("chat_id", ev.chatId)
-      .eq("uid", ev.uid ?? "");
-    if (error) setError(`Could not save that change: ${error.message}`);
+    try {
+      await persistPatch(ev, { status });
+    } catch (err) {
+      setError(`Could not save that change: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   const approveAllHigh = async () => {
@@ -66,14 +71,12 @@ export default function App() {
     for (const ev of batch) await setEventStatus(ev, "approved");
   };
 
-  const persistEventEdits = async (ev: ChatEvent, patch: Record<string, unknown>) => {
-    const { supabase } = await import("./lib/supabase");
-    const { error } = await supabase
-      .from("events")
-      .update(patch)
-      .eq("chat_id", ev.chatId)
-      .eq("uid", ev.uid ?? "");
-    if (error) setError(`Could not save that edit: ${error.message}`);
+  const persistEventEdits = async (ev: ChatEvent, patch: EventPatch) => {
+    try {
+      await persistPatch(ev, patch);
+    } catch (err) {
+      setError(`Could not save that edit: ${err instanceof Error ? err.message : String(err)}`);
+    }
   };
 
   const loadSample = (sampleId: string) => {
@@ -305,7 +308,7 @@ export default function App() {
                 <p className="font-medium">Running in offline mode</p>
                 <p className="mt-0.5 text-amber-800">{offlineNotice}</p>
                 <p className="mt-0.5 text-amber-700">
-                  Dates were resolved with the built-in rules instead of Jev — everything is
+                  Events were found with the built-in rules instead of Jev and the LLM — everything is
                   flagged for your review, so nothing slips through unverified.
                 </p>
               </div>
@@ -408,7 +411,7 @@ function Lane({
   events: ChatEvent[];
   onStatus: (ev: ChatEvent, status: ChatEvent["status"]) => void;
   onUpdate: (id: string, patch: Partial<ChatEvent>) => void;
-  onPersistEdits: (ev: ChatEvent, patch: Record<string, unknown>) => void;
+  onPersistEdits: (ev: ChatEvent, patch: EventPatch) => void;
   onHighlight: (ids: Set<string>) => void;
 }) {
   return (
@@ -437,7 +440,7 @@ function EventCard({
   ev: ChatEvent;
   onStatus: (ev: ChatEvent, status: ChatEvent["status"]) => void;
   onUpdate: (id: string, patch: Partial<ChatEvent>) => void;
-  onPersistEdits: (ev: ChatEvent, patch: Record<string, unknown>) => void;
+  onPersistEdits: (ev: ChatEvent, patch: EventPatch) => void;
   onHighlight: (ids: Set<string>) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -454,12 +457,12 @@ function EventCard({
       needsReview: false,
     });
     setEditing(false);
+    // chat-store marks the event reviewed on a human edit.
     onPersistEdits(ev, {
       title: titleDraft.trim() || ev.title,
       start_date: dateDraft || null,
       start_time: timeDraft ? `${timeDraft}:00` : null,
       all_day: !timeDraft,
-      needs_review: false,
     });
   };
 
@@ -519,7 +522,7 @@ function EventCard({
       <AttendeeList attendees={ev.attendees} />
 
       <details className="mt-2">
-        <summary className="cursor-pointer text-xs text-stone-400 hover:text-stone-600">Probabilities</summary>
+        <summary className="cursor-pointer text-xs text-stone-400 hover:text-stone-600">Details</summary>
         <div className="mt-1.5">
           <ProbabilityBars parts={ev.parts as Record<string, unknown> | null} />
         </div>
@@ -698,7 +701,6 @@ function ExportPanel({
   const [llmPerMsgUsd, setLlmPerMsgUsd] = useState(0.001_2);
 
   const allLlmCost = totalMessages * llmPerMsgUsd;
-  const actualCost = stats.jevCostUsd + stats.datePartsCostUsd + stats.attendeesCostUsd + keptMessages * llmPerMsgUsd;
 
   return (
     <div className="rounded-2xl border border-stone-200/80 bg-white shadow-sm">

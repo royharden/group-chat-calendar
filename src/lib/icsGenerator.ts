@@ -20,7 +20,7 @@ function fold(line: string): string[] {
   let rest = line;
   let isFirst = true;
   while (rest.length > 0) {
-    let limit = isFirst ? 75 : 74; // continuation lines carry a leading space
+    const limit = isFirst ? 75 : 74; // continuation lines carry a leading space
     let chunk = rest;
     while (encoded.encode(chunk).length > limit && chunk.length > 0) {
       chunk = chunk.slice(0, -1);
@@ -117,7 +117,7 @@ export function generateICS(
     `X-WR-CALNAME:${escapeText(chatTitle)}`,
   ];
 
-  const timedEvents = events.filter((e) => !e.allDay && e.kind !== "deadline" && e.startTime && e.startDate);
+  const timedEvents = events.filter((e) => !e.allDay && e.startTime && e.startDate);
   const tz = timezone?.trim() || timedEvents[0]?.timezone;
   const useTzid = !!tz && tz !== "UTC";
   if (useTzid && tz) {
@@ -136,15 +136,17 @@ export function generateICS(
     lines.push(`SUMMARY:${escapeText(isDeadline ? `Due: ${ev.title}` : ev.title)}`);
 
     if (ev.startDate) {
-      if (ev.allDay || isDeadline || !ev.startTime) {
+      // Only events without a time are all-day. A timed deadline keeps its
+      // time and has no DTEND (a moment, not a block).
+      if (ev.allDay || !ev.startTime) {
         lines.push(`DTSTART;VALUE=DATE:${dateStamp(ev.startDate)}`);
       } else if (useTzid && tz) {
         // Local wall-clock time with an explicit timezone — 4 PM stays 4 PM.
         lines.push(`DTSTART;TZID=${tz}:${dateStamp(ev.startDate)}T${timeStr(ev.startTime)}`);
-        lines.push(`DTEND;TZID=${tz}:${dateStamp(ev.startDate)}T${timeStr(shiftHour(ev.startTime))}`);
+        if (!isDeadline) lines.push(`DTEND;TZID=${tz}:${dateStamp(ev.startDate)}T${timeStr(shiftHour(ev.startTime))}`);
       } else {
         lines.push(`DTSTART:${dateStamp(ev.startDate)}T${timeStr(ev.startTime)}Z`);
-        lines.push(`DTEND:${dateStamp(ev.startDate)}T${timeStr(shiftHour(ev.startTime))}Z`);
+        if (!isDeadline) lines.push(`DTEND:${dateStamp(ev.startDate)}T${timeStr(shiftHour(ev.startTime))}Z`);
       }
     }
 

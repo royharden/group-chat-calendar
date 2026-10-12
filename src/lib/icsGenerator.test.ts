@@ -58,6 +58,15 @@ describe("generateICS", () => {
     expect(ics).toContain("TRIGGER:-P1D");
   });
 
+  it("keeps the time of a timed deadline (no DTEND)", () => {
+    const ev = makeEvent({ kind: "deadline", title: "Forms", startTime: "15:00:00", allDay: false, timezone: "America/Chicago" });
+    const ics = generateICS([ev], "T", new Date(), "America/Chicago");
+    expect(ics).toContain("DTSTART;TZID=America/Chicago:20261013T150000");
+    expect(ics).not.toContain("DTEND");
+    expect(ics).toContain("SUMMARY:Due: Forms");
+    expect(ics).toContain("BEGIN:VTIMEZONE");
+  });
+
   it("marks cancellations with STATUS:CANCELLED", () => {
     const ev = makeEvent({ kind: "cancellation", status: "cancelled" });
     const ics = generateICS([ev], "T");

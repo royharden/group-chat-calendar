@@ -1,10 +1,17 @@
 project_id = "group-chat-calendar"
 
+# Every function requires a valid JWT (the anon key, sent as
+# `Authorization: Bearer <anon key>` by supabase.functions.invoke).
 [functions.jev]
-verify_jwt = false
+verify_jwt = true
 
 [functions.extract-events]
-verify_jwt = false
+verify_jwt = true
 
+[functions.chat-store]
+verify_jwt = true
+
+# Public read-only calendar feed: calendar apps subscribe without auth.
+# It calls no AI and only serves the chat picked by the unguessable slug.
 [functions.ics-feed]
 verify_jwt = false

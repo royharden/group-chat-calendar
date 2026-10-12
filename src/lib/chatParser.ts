@@ -3,6 +3,7 @@ export interface ParsedMessage {
   sent_at: string; // ISO string
   sender: string;
   text: string;
+  sent_at_estimated?: boolean; // plain "Name: text" export with no dates: sent_at is the paste time
 }
 
 interface HeaderMatch {
@@ -45,7 +46,6 @@ export function wallClockToInstant(
   if (m === "AM" && h === 12) h = 0;
 
   const yyyy = year < 100 ? 2000 + year : year;
-  const pad = (n: number) => String(n).padStart(2, "0");
   let utc = new Date(Date.UTC(yyyy, month - 1, day, h, minute, 0));
   if (tz && tz !== "UTC") {
     try {
@@ -159,6 +159,7 @@ export function parseChat(
           sent_at: sentAt.toISOString(),
           sender: m[1].trim(),
           text: m[2],
+          ...(firstDate ? {} : { sent_at_estimated: true }),
         };
       } else if (current) {
         current.text += "\n" + trimmed;

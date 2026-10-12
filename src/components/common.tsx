@@ -54,8 +54,43 @@ export function AttendeeList({ attendees }: { attendees: Attendee[] }) {
   );
 }
 
+const RULE_LABELS: Record<string, string> = {
+  today: "today",
+  tomorrow: "tomorrow",
+  day_after_tomorrow: "day after tomorrow",
+  yesterday: "yesterday",
+  weekday: "next matching weekday",
+  next_weekday: "weekday in the following week",
+  month_day: "month + day",
+  numeric_date: "numeric date",
+  day_of_month: "day of the month",
+  none: "unresolved",
+};
+
+// How the code resolver read the date (rule, reference day, time source).
+function ResolverDetails({ parts }: { parts: Record<string, unknown> }) {
+  const rows: [string, string][] = [];
+  if (typeof parts.rule === "string") rows.push(["rule", RULE_LABELS[parts.rule] ?? parts.rule]);
+  if (typeof parts.reference_date === "string") rows.push(["sent on", parts.reference_date]);
+  if (typeof parts.time_source === "string") {
+    rows.push(["time from", parts.time_source === "time_phrase" ? "extracted time" : "message text"]);
+  }
+  if (typeof parts.end_time === "string") rows.push(["ends", parts.end_time.slice(0, 5)]);
+  return (
+    <div className="space-y-1">
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex items-center gap-2 text-xs">
+          <span className="w-20 shrink-0 text-stone-500">{k}</span>
+          <span className="rounded bg-stone-800/5 px-1.5 py-0.5 text-stone-700">{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function ProbabilityBars({ parts }: { parts: Record<string, unknown> | null }) {
   if (!parts) return null;
+  if (parts.resolver === "code") return <ResolverDetails parts={parts} />;
   const interest = ["mode", "day_anchor", "weekday", "month", "day", "week_offset", "meridiem", "year"];
   const rows: { q: string; probs: [string, number][] }[] = [];
   for (const q of interest) {

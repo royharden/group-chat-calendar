@@ -8,7 +8,9 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "test": "vitest run",
+    "test:functions": "deno test --no-lock --allow-env --allow-read supabase/functions/_tests/functions_test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.57.4",
